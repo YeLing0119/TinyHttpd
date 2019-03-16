@@ -98,6 +98,14 @@ class Util{
 
             return "text/html";
         }
+
+        static std::string ErrorCodeToPage(int Error_code){
+            switch(Error_code){
+                case 400: return "wwwroot/404.html";break;
+                case 404: return "wwwroot/404.html";break;
+                default: return "wwwroot/404.html";break;
+            }
+        }
 };
 
 
@@ -187,15 +195,18 @@ class HttpRequest{
                 size_t pos = uri.find('?');
                 if(pos != std::string::npos){
                     // GET 带参
+                    cgi = true;
                     request_path += uri.substr(0, pos);
                     request_parm = uri.substr(pos + 1);
                 }else{
                     // GET 不带参
+                    cgi = false;
                     request_path += uri;
                 }
             }else{
                 // POST 方法
-               request_line += uri; 
+                cgi = true;
+                request_line += uri; 
             }
         }
         
@@ -277,7 +288,7 @@ class HttpResponse{
             response_line += Util::IntToString(httpreq->GetStatusCode());
             response_line += ' ';
             response_line +=Util::StatusCodeToStatusInfo(httpreq->GetStatusCode());
-            response_line += '\n';
+            response_line += "\r\n";
         }
         void MakeResponseHeader(HttpRequest* httpreq){
             std::string key = "Content-Lenght: ";
@@ -285,16 +296,16 @@ class HttpResponse{
 
             response_header += key;
             response_header += value;
-            response_header += '\n';
+            response_header += "\r\n";
 
             key = "Content-Type: ";
             value = Util::SuffixToType(httpreq->GetRequestPath());
             
             response_header += key;
             response_header += value;
-            response_header += '\n';
+            response_header += "\r\n";
             
-            response_header += '\n';
+            response_header += "\r\n";
         }
 };
 
@@ -364,10 +375,19 @@ class Connect{
             if(sendfd < 0){
                 LOG("Open Source File Error", WARNING);
             }
-
-            sendfile(sock, sendfd, NULL, httpreq->GetResourceSize());
+            size_t ret =  sendfile(sock, sendfd, NULL, httpreq->GetResourceSize());
+            if(ret < 0){
+                LOG("Send File Error", WARNING);
+            }
 
             LOG("Send Response Success", NORMAL);
+        }
+
+        void ClearRequest(){
+            std::string line = "Hello";
+            while(line != ""){
+                GetOneLine(line);
+            }
         }
 
         ~Connect(){
@@ -379,11 +399,7 @@ class Connect{
 
 class Entry{
 	public:
-		static void *HandlerRequest(void *arg){
-			pthread_detach(pthread_self());
-			int sock = *(int *)arg;
-			delete (int *)arg;
-
+		static void HandlerRequest(int sock){
 	#ifdef _DEBUG_
 			// for test 
 			char buff[10240];
@@ -406,6 +422,7 @@ class Entry{
             // 分析请求方式是否合法
             if(httpreq->IsMethodLegal() == 400){
                 httpreq->SetStatusCode(400);
+                conn->ClearRequest();
                 LOG("Request Method Is not legal", WARNING);
                 goto end;
             }
@@ -415,12 +432,14 @@ class Entry{
             // 分析 request_path 是否合法
             if(httpreq->IsRequestPathLegal() == 404){
                 httpreq->SetStatusCode(404);
-                LOG("Request Path Is Not Legal", WARNING);
+                conn->ClearRequest();
+                LOG("File Not Find", WARNING);
                 goto end;
             }
             // 获取请求报头    
             conn->GetRequestHeader(httpreq);
-
+            
+            // 获取请求正文
             if(httpreq->GetRequestMethod() == "POST"){
                 conn->GetRequestText(httpreq);
             }
@@ -430,14 +449,10 @@ class Entry{
 	#endif
 
     end:
-            if(httpreq->GetStatusCode() == 400){
-                httpreq->SetRequestPath("wwwroot/404.html");
-                struct stat error_stat;
-                stat(httpreq->GetRequestPath().c_str(), &error_stat);
-                httpreq->SetResourceSize(error_stat.st_size);
-                ProcessNoneCgi(httpreq, httprsp, conn);
-            }else if(httpreq->GetStatusCode() == 404){
-                httpreq->SetRequestPath("wwwroot/404.html");
+            if(httpreq->GetStatusCode() != 200){ 
+                std::string error_path = Util::ErrorCodeToPage(httpreq->GetStatusCode());
+
+                httpreq->SetRequestPath(error_path);
                 struct stat error_stat;
                 stat(httpreq->GetRequestPath().c_str(), &error_stat);
                 httpreq->SetResourceSize(error_stat.st_size);
@@ -447,8 +462,6 @@ class Entry{
             delete httpreq;
             delete httprsp;
             delete conn;
-
-            return (void *)0;
 		}
 
         static void ProcessResponse(HttpRequest* httpreq, HttpResponse* httprsp, Connect* conn){
@@ -466,8 +479,32 @@ class Entry{
             httprsp->MakeResponseHeader(httpreq);
             conn->SendResponse(httpreq, httprsp);
         }
+        static int ProcessWithCgi(HttpRequest *httpreq, HttpResponse* httprsp, Connect* conn){
+            int pipefd[2];
+            int ret = pipe(pipefd);
+            if(ret < 0){
+                LOG("Create Pipe Error", WARNING);
+                return 503;
+            }
+            pid_t pid = fork();
+
+            if(pid == 0){
+                // 子进程 
+                close(pipefd[1]);
+                close(pipefd[0]);
+
+
+            }else if(pid > 0){
+                // 父进程
+                close(pipefd[0]);
+                close(pipefd[1]);
+
+            }else{
+                LOG("Fork Error", WARNING);
+            }
+
+            return 200;
+        }
 };
-
-
 
 #endif // __PROTACOLUTIL_HPP__
